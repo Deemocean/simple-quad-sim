@@ -38,6 +38,7 @@ class QuadPlotter(object):
                                      anim_callback,
                                      init_func=None,
                                      frames=400, interval=1, blit=False)
+        #an.save('sim.gif', dpi=300, writer='imagemagick', fps=60)
         if len(sys.argv) > 1 and sys.argv[1] == 'save':
             an.save('sim.gif', dpi=300, writer='imagemagick', fps=60)
         else:
