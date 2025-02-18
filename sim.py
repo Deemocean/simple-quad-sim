@@ -32,6 +32,9 @@ def normalized(v):
     norm = np.linalg.norm(v)
     return v / norm
 
+
+
+
 NO_STATES = 13
 IDX_POS_X = 0
 IDX_POS_Y = 1
@@ -82,10 +85,10 @@ class Robot:
 
         # NF
         self.a = np.zeros((3,1))
-        self.lamb = 1.0
-        self.P = np.eye(3) * 0.5
-        self.R = np.eye(3) * 0.5
-        self.Q = np.eye(3) * 0.1
+        self.lamb = 2.0
+        self.P = np.eye(3) 
+        self.R = np.eye(3) * 3
+        self.Q = np.eye(3) * 0.5
 
         #Logging
         self.traj = []
@@ -96,7 +99,14 @@ class Robot:
         self.T_sp = np.array([0.0, 0.0, 0.0, 0.0])
         self.q_sp = np.array([0.0, 0.0, 0.0, 0.0])
 
+        # Low Pass Phi
+        self.smooth_Phi = np.zeros((3,3))
 
+    def low_pass_filter(self, Phi):
+        alpha = 0.3
+        self.smooth_Phi = alpha * Phi + (1 - alpha) * self.smooth_Phi
+        return self.smooth_Phi
+    
     def reset_state_and_input(self, init_xyz, init_quat_wxyz):
         state0 = np.zeros(NO_STATES)
         state0[IDX_POS_X:IDX_POS_Z+1] = init_xyz
@@ -199,70 +209,68 @@ class Robot:
         q = self.state[IDX_QUAT_W:IDX_QUAT_Z+1]
         omega_b = self.state[IDX_OMEGA_X:IDX_OMEGA_Z+1]
 
+        # Rotation Matrix
+        R_B_to_I = scipy.spatial.transform.Rotation.from_quat([q[1], q[2], q[3], q[0]]).as_matrix()
+        self.R_B_to_I = R_B_to_I
+        R_I_to_B = R_B_to_I.T
+
         # Position controller.
         k_p = 1.0
         k_d = 10.0
         v_r = v_d_I - k_p * (p_I - p_d_I)
         a = -k_d * (v_I - v_r) + np.array([0, 0, 9.81])
         f = self.m * a
-
         # Wind disturbance.
         F0 = 8
-        # w_wind = np.pi/4
-        # phi = 0.5
-        #f_wind = F0 * np.array([np.sin(w_wind * self.time+ phi), 0, 0])
-        f_wind = F0 * np.array([1, 0, 0])# constant wind
+        # ===[Sinusoidal Wind]===
+        w_wind = np.pi/4
+        phi = 0.5
+        f_wind = F0 * np.array([np.sin(w_wind * self.time+ phi), 0, 0])
+        # ===[Constant Wind]===
+        #f_wind = F0 * np.array([1, 0, 0])# constant wind
         f += f_wind
-
         #-----------------Adaptive Control NF-----------------
         # Compute Phi from partial state
         X = torch.from_numpy(np.concatenate([v_I, q, self.omega_motors])).flatten()
         phi_val  = model.phi(X).detach().numpy().reshape(-1)
-        #Phi  = np.diag(phi_val)
-        Phi  = np.eye(3)
-        #print("|Phi|  ",np.linalg.norm(Phi))
+        phi_val = np.array(phi_val).reshape(3,1)
+        # Phi_Net output for this specific model is too fluctuating which causes instability
+        # So as a hot patch we will apply a low pass filter to smooth the output
+        Phi_raw  = np.diag(phi_val.flatten())
+        Phi = self.low_pass_filter(Phi_raw)
         Phi_T = np.transpose(Phi) 
-
-        #print("Phi, Phi_T shape: ",Phi.shape, Phi_T.shape)
         #----------------------Update a------------------------
         s = (v_I - v_r).reshape(3, 1) 
- 
         # ===[Regularization Term]===
         a_dot_reg = - self.lamb * self.a 
-        #print("a_dot_reg shape: ", a_dot_reg.shape)
         # ===[Prediction Error Term]===
         error = Phi @ self.a - f_wind.reshape(3,1) 
-        # print("R shape: ",self.R.shape)
-        #print("error shape: ",error.shape)
         a_dot_pred = - self.P @ Phi_T@ np.linalg.pinv(self.R) @ error
-        #print("a_dot_pred shape: ",a_dot_pred.shape)
         #===[Tracking Error Term]===
         a_dot_track_err =self.P @ Phi_T @ s
-        #print("a_dot_track_err shape: ",a_dot_track_err.shape)
         # [Finally, update a]
         a_dot = a_dot_pred + a_dot_reg + a_dot_track_err
-        #print("a_dot shape: ",a_dot.shape)
         self.a += a_dot * dt
-        #print("a: ",self.a)
         #-----------------------Update P----------------------
         P_dot = -2 * self.lamb * self.P + self.Q - self.P @ Phi_T @ np.linalg.pinv(self.R) @ Phi @ self.P 
         self.P += P_dot * dt
-        #print("u_NF  ",-Phi@self.a)
-        f+= (- Phi @ self.a).flatten()
-        print("NF PD |s|  ",np.linalg.norm(s))
-        # if(self.time > 2):
-        #     #print("u_NF  ",-Phi@self.a)
-        #     #print("f_wind  ",f_wind)
-        #     f+= (- Phi @ self.a).flatten()
-        #     print("NF PD |s|  ",np.linalg.norm(s))
-        # else:
-        #     print("PD |s|  ",np.linalg.norm(s))
-
-        R_B_to_I = scipy.spatial.transform.Rotation.from_quat([q[1], q[2], q[3], q[0]]).as_matrix()
-        self.R_B_to_I = R_B_to_I
-        R_I_to_B = R_B_to_I.T
-        # Wind in body frame.
-        self.fa = R_I_to_B @ f_wind
+        #----------------Apply NF Adaptive Control-------------
+        f+= (-Phi @ self.a).flatten()
+        #---------------------Debug Prints---------------------
+        print("u_nf ", (- Phi @ self.a).flatten())
+        print("|error|  ",np.linalg.norm(error))
+        print("|a_dot_pred|  ",np.linalg.norm(a_dot_pred))
+        print("|a_dot_reg|  ",np.linalg.norm(a_dot_reg))
+        print("|a_dot_track_err|  ",np.linalg.norm(a_dot_track_err))
+        print("|P|  ",np.linalg.norm(self.P))
+        print("|a|  ",np.linalg.norm(self.a))
+        print("|Phi|  ",np.linalg.norm(Phi))
+        print("Phi diag: ", np.diag(Phi))
+        print("|s|  ",np.linalg.norm(s))
+        print("-----------------------------")
+        # Here we record the unmodelled aero force as the wind force in Inertial frame
+        # Which assumes perfect state estimation
+        self.fa = f_wind 
         f_b = R_I_to_B @ f
         thrust = np.max([0, f_b[2]])
         self.T_sp = thrust
@@ -319,20 +327,20 @@ def get_pos_full_quadcopter(quad):
     return pos_full_quad
 
 def control_propellers(quad, model):
-    # t = quad.time
-    # T = 10.0
-    # r = 2*np.pi * t / T
-    # prop_thrusts = quad.control(p_d_I = np.array([np.cos(r/2), np.sin(r), 0.0]))
-    # Note: for Hover mode, just replace the desired trajectory with [1, 0, 1]
+    t = quad.time
+    T = 10.0
+    r = 2*np.pi * t / T
+    # prop_thrusts = quad.control(p_d_I = np.array([np.cos(r/2), np.sin(r), 0.0]),
+    #                            v_d_I = np.array([-0.5*np.sin(r/2), np.cos(r), 0.0]), model=model)
 
     prop_thrusts = quad.control(p_d_I = np.array([0.0, 0.0, 0.0]), v_d_I = np.array([0.0, 0.0, 0.0]), model=model)
     quad.update(prop_thrusts, dt)
 
-def sim_without_animation(model):
+def  sim_save_train(model, path):
     quadcopter = Robot()
     for _ in range(2000):
         control_propellers(quadcopter,model)
-    quadcopter.save_trajectory("data/custom_constant_baseline_6wind.csv")
+    quadcopter.save_trajectory(path)
 
 def sim_with_animation(model):
     quadcopter = Robot()
@@ -351,11 +359,15 @@ def main():
     dataset = 'sim' 
     #Load in model 
     modelname = f"{dataset}_dim-a-{dim_a}_{'-'.join(features)}"
-    stopping_epoch = 50
+    stopping_epoch = 40
     model = mlmodel.load_model(modelname = modelname + '-epoch-' + str(stopping_epoch))
-    #print("Loaded model: ",model)
+    print("Loaded model: ",model)
+
     sim_with_animation(model)    
-    #sim_without_animation(model)
+
+    # Save trajectory for NF Training
+    # path = "data/custom_constant_baseline_8wind.csv"
+    # sim_save_train(model,path) 
 
 if __name__ == "__main__":
     main()
