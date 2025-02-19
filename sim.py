@@ -219,24 +219,33 @@ class Robot:
         R_B_to_I = scipy.spatial.transform.Rotation.from_quat([q[1], q[2], q[3], q[0]]).as_matrix()
         self.R_B_to_I = R_B_to_I
         R_I_to_B = R_B_to_I.T
-
+        # nominal feedforward
+        g_I  = np.array([0, 0, 9.81])
+        f = self.m * (g_I) 
         # Position controller.
         k_p = 1.0
         k_d = 10.0
         v_r = v_d_I - k_p * (p_I - p_d_I)
-        a = -k_d * (v_I - v_r) + np.array([0, 0, 9.81])
-        f = self.m * a
+        a = -k_d * (v_I - v_r)
+        u_pd = self.m * a # PD controller
         # Wind disturbance.
-        F0 = 4
+        F0 = 10
         w_wind = np.pi/4
         phi = 0.5
         f_wind = np.array([0, 0, 0])
-        if self.time >1:
-            # ===[Constant Wind]===
-            f_wind = F0 * np.array([1, 0, 0])# constant wind
-            # ===[Sinusoidal Wind]===
-            #f_wind = F0 * np.array([np.sin(w_wind * self.time+ phi), 0, 0])
 
+        if self.time < 0.2:
+            f_wind = np.array([0, 0, 0])
+        elif self.time <= 0.7:
+            # Compute alpha for smooth transition: 0 at t=0.2, 1 at t=0.7
+            alpha = (self.time - 0.2) / 0.5
+            f_wind = alpha * F0 * np.array([1, 0, 0])
+            # ===[Sinusoidal Wind]===
+            #f_wind = alpha * F0 * np.array([np.sin(w_wind * self.time+ phi), 0, 0])
+        else:
+            f_wind = F0 * np.array([1, 0, 0])
+            # ===[Sinusoidal Wind]===
+            #f_wind =  F0 * np.array([np.sin(w_wind * self.time+ phi), 0, 0])
 
         f += f_wind
         #-----------------Adaptive Control NF-----------------
@@ -265,9 +274,13 @@ class Robot:
         #-----------------------Update P----------------------
         P_dot = -2 * self.lamb * self.P + self.Q - self.P @ Phi_T @ np.linalg.pinv(self.R) @ Phi @ self.P 
         self.P += P_dot * dt
-        #----------------Apply NF Adaptive Control-------------
-        f+= (-Phi @ self.a).flatten()
-        #---------------------Debug Prints---------------------
+        #----------------Get NF Adaptive Control--------------
+        u_NF= (-Phi @ self.a).flatten()
+        #----------------Apply Both Control-------------------
+        u = np.clip(u_pd + u_NF, -15, 15)
+        #u = np.clip(u_pd, -15, 15)
+        f+=u
+        #---------------------Debug Prints--------------------
         print("Blowing Wind: ", f_wind)
         print("u_nf ", (- Phi @ self.a).flatten())
         print("|error|  ",np.linalg.norm(error))
@@ -278,6 +291,7 @@ class Robot:
         print("|a|  ",np.linalg.norm(self.a))
         print("|Phi|  ",np.linalg.norm(Phi))
         print("Phi: ", Phi)
+        print("u: ", u)
         print("|s|  ",np.linalg.norm(s))
         print("-----------------------------")
         # Here we record the unmodelled aero force as the wind force in Inertial frame
