@@ -33,6 +33,10 @@ def normalized(v):
     return v / norm
 
 
+def build_block_matrix_Phi(phi_vec):
+    phi = np.array(phi_vec).reshape(1, 3)
+    return np.kron(np.eye(3), phi)
+
 
 
 NO_STATES = 13
@@ -84,11 +88,12 @@ class Robot:
         self.time = 0.0
 
         # NF
-        self.a = np.zeros((3,1))
+        #self.a = np.zeros((3,1))
+        self.a = np.zeros((9,1))
         self.lamb = 2.0
-        self.P = np.eye(3) 
+        self.P = np.eye(9) 
         self.R = np.eye(3) * 3
-        self.Q = np.eye(3) * 0.5
+        self.Q = np.eye(9) * 0.5
 
         #Logging
         self.traj = []
@@ -100,7 +105,7 @@ class Robot:
         self.q_sp = np.array([0.0, 0.0, 0.0, 0.0])
 
         # Low Pass Phi
-        self.smooth_Phi = np.zeros((3,3))
+        self.smooth_Phi = np.zeros((3,9))
 
     def low_pass_filter(self, Phi):
         alpha = 0.3
@@ -234,18 +239,18 @@ class Robot:
         X = torch.from_numpy(np.concatenate([v_I, q, self.omega_motors])).flatten()
         phi_val  = model.phi(X).detach().numpy().reshape(-1)
         phi_val = np.array(phi_val).reshape(3,1)
+        Phi_raw  = build_block_matrix_Phi(phi_val) # 3 x 9
         # Phi_Net output for this specific model is too fluctuating which causes instability
         # So as a hot patch we will apply a low pass filter to smooth the output
-        Phi_raw  = np.diag(phi_val.flatten())
         Phi = self.low_pass_filter(Phi_raw)
-        Phi_T = np.transpose(Phi) 
+        Phi_T = np.transpose(Phi) # 9 x 3
         #----------------------Update a------------------------
         s = (v_I - v_r).reshape(3, 1) 
         # ===[Regularization Term]===
         a_dot_reg = - self.lamb * self.a 
         # ===[Prediction Error Term]===
         error = Phi @ self.a - f_wind.reshape(3,1) 
-        a_dot_pred = - self.P @ Phi_T@ np.linalg.pinv(self.R) @ error
+        a_dot_pred = - self.P @ Phi_T @ np.linalg.pinv(self.R) @ error
         #===[Tracking Error Term]===
         a_dot_track_err =self.P @ Phi_T @ s
         # [Finally, update a]
@@ -265,7 +270,7 @@ class Robot:
         print("|P|  ",np.linalg.norm(self.P))
         print("|a|  ",np.linalg.norm(self.a))
         print("|Phi|  ",np.linalg.norm(Phi))
-        print("Phi diag: ", np.diag(Phi))
+        print("Phi: ", phi_val.flatten())
         print("|s|  ",np.linalg.norm(s))
         print("-----------------------------")
         # Here we record the unmodelled aero force as the wind force in Inertial frame
