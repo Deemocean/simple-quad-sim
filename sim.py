@@ -37,8 +37,6 @@ def build_block_matrix_Phi(phi_vec):
     phi = np.array(phi_vec).reshape(1, 3)
     return np.kron(np.eye(3), phi)
 
-
-
 NO_STATES = 13
 IDX_POS_X = 0
 IDX_POS_Y = 1
@@ -90,10 +88,10 @@ class Robot:
         # NF
         #self.a = np.zeros((3,1))
         self.a = np.zeros((9,1))
-        self.lamb = 2.0
-        self.P = np.eye(9) 
-        self.R = np.eye(3) * 3
-        self.Q = np.eye(9) * 0.5
+        self.lamb = 0.2
+        self.P = np.eye(9) * 1
+        self.R = np.eye(3) * 20.0
+        self.Q = np.eye(9) * 0.1
 
         #Logging
         self.traj = []
@@ -105,11 +103,14 @@ class Robot:
         self.q_sp = np.array([0.0, 0.0, 0.0, 0.0])
 
         # Low Pass Phi
-        self.smooth_Phi = np.zeros((3,9))
+        self.smooth_Phi = None
 
     def low_pass_filter(self, Phi):
-        alpha = 0.3
-        self.smooth_Phi = alpha * Phi + (1 - alpha) * self.smooth_Phi
+        if self.smooth_Phi is None:
+            self.smooth_Phi = Phi
+        else:
+            alpha = 0.3
+            self.smooth_Phi = alpha * Phi + (1 - alpha) * self.smooth_Phi
         return self.smooth_Phi
     
     def reset_state_and_input(self, init_xyz, init_quat_wxyz):
@@ -226,19 +227,24 @@ class Robot:
         a = -k_d * (v_I - v_r) + np.array([0, 0, 9.81])
         f = self.m * a
         # Wind disturbance.
-        F0 = 8
-        # ===[Sinusoidal Wind]===
+        F0 = 4
         w_wind = np.pi/4
         phi = 0.5
-        f_wind = F0 * np.array([np.sin(w_wind * self.time+ phi), 0, 0])
-        # ===[Constant Wind]===
-        #f_wind = F0 * np.array([1, 0, 0])# constant wind
+        f_wind = np.array([0, 0, 0])
+        if self.time >1:
+            # ===[Constant Wind]===
+            f_wind = F0 * np.array([1, 0, 0])# constant wind
+            # ===[Sinusoidal Wind]===
+            #f_wind = F0 * np.array([np.sin(w_wind * self.time+ phi), 0, 0])
+
+
         f += f_wind
         #-----------------Adaptive Control NF-----------------
         # Compute Phi from partial state
         X = torch.from_numpy(np.concatenate([v_I, q, self.omega_motors])).flatten()
         phi_val  = model.phi(X).detach().numpy().reshape(-1)
         phi_val = np.array(phi_val).reshape(3,1)
+        #phi_val = np.array([1,1,1]).reshape(3,1)
         Phi_raw  = build_block_matrix_Phi(phi_val) # 3 x 9
         # Phi_Net output for this specific model is too fluctuating which causes instability
         # So as a hot patch we will apply a low pass filter to smooth the output
@@ -262,6 +268,7 @@ class Robot:
         #----------------Apply NF Adaptive Control-------------
         f+= (-Phi @ self.a).flatten()
         #---------------------Debug Prints---------------------
+        print("Blowing Wind: ", f_wind)
         print("u_nf ", (- Phi @ self.a).flatten())
         print("|error|  ",np.linalg.norm(error))
         print("|a_dot_pred|  ",np.linalg.norm(a_dot_pred))
@@ -270,7 +277,7 @@ class Robot:
         print("|P|  ",np.linalg.norm(self.P))
         print("|a|  ",np.linalg.norm(self.a))
         print("|Phi|  ",np.linalg.norm(Phi))
-        print("Phi: ", phi_val.flatten())
+        print("Phi: ", Phi)
         print("|s|  ",np.linalg.norm(s))
         print("-----------------------------")
         # Here we record the unmodelled aero force as the wind force in Inertial frame
